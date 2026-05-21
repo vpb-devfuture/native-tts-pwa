@@ -124,6 +124,27 @@
           </div>
         </div>
 
+        <!-- Repeat Control -->
+        <div class="control-group">
+          <label class="control-label">
+            <span>Repeat</span>
+            <span class="control-value" id="repeatValue">Off</span>
+          </label>
+          <div class="select-wrapper">
+            <select id="repeatSelect" aria-label="Repeat count">
+              <option value="1">Off</option>
+              <option value="2">2 times</option>
+              <option value="3">3 times</option>
+              <option value="5">5 times</option>
+              <option value="10">10 times</option>
+              <option value="0">Loop</option>
+            </select>
+            <svg class="select-icon" width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+              <path d="M2.5 4.5L6 8l3.5-3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </div>
+        </div>
+
         <!-- Action Buttons -->
         <div class="actions">
           <button id="speakBtn" class="btn-primary" type="button">

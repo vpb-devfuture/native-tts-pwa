@@ -6,10 +6,12 @@ const DEFAULT_SETTINGS = {
   rate: 1.0,
   pitch: 1.0,
   volume: 1.0,
+  repeatCount: 1,
   theme: 'light' // light | dark | auto
 };
 
 const STORAGE_KEY = 'voxa-settings';
+const REPEAT_GAP_MS = 250;
 
 // Elements
 const app = document.querySelector('.app');
@@ -21,6 +23,8 @@ const rateSlider = document.getElementById('rateSlider');
 const rateValue = document.getElementById('rateValue');
 const pitchSlider = document.getElementById('pitchSlider');
 const pitchValue = document.getElementById('pitchValue');
+const repeatSelect = document.getElementById('repeatSelect');
+const repeatValue = document.getElementById('repeatValue');
 const speakBtn = document.getElementById('speakBtn');
 const pauseBtn = document.getElementById('pauseBtn');
 const stopBtn = document.getElementById('stopBtn');
@@ -35,6 +39,10 @@ const THEME_LABELS = { dark: 'Dark mode', light: 'Light mode', auto: 'Auto (syst
 let currentState = 'idle';
 let currentUtterance = null;
 let availableVoices = [];
+let playbackSessionId = 0;
+let activeText = '';
+let activeRepeatCount = 1;
+let activeRepeatIndex = 0;
 
 const speechSupported = 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window;
 
@@ -62,7 +70,7 @@ function setState(state) {
 
   switch (state) {
     case 'idle':
-      statusText.textContent = speechSupported ? 'Ready' : 'Unsupported';
+      statusText.textContent = getStatusText(state);
       speakBtn.disabled = !speechSupported;
       pauseBtn.disabled = true;
       stopBtn.disabled = true;
@@ -70,12 +78,13 @@ function setState(state) {
       voiceSelect.disabled = !speechSupported || availableVoices.length === 0;
       rateSlider.disabled = !speechSupported;
       pitchSlider.disabled = !speechSupported;
+      repeatSelect.disabled = !speechSupported;
       practiceCards.forEach((card) => { card.disabled = !speechSupported; });
       updatePauseButton(false);
       break;
 
     case 'loading':
-      statusText.textContent = 'Loading';
+      statusText.textContent = getStatusText(state);
       speakBtn.disabled = true;
       pauseBtn.disabled = true;
       stopBtn.disabled = false;
@@ -83,11 +92,12 @@ function setState(state) {
       voiceSelect.disabled = true;
       rateSlider.disabled = true;
       pitchSlider.disabled = true;
+      repeatSelect.disabled = true;
       practiceCards.forEach((card) => { card.disabled = true; });
       break;
 
     case 'speaking':
-      statusText.textContent = 'Speaking';
+      statusText.textContent = getStatusText(state);
       speakBtn.disabled = true;
       pauseBtn.disabled = false;
       stopBtn.disabled = false;
@@ -95,12 +105,13 @@ function setState(state) {
       voiceSelect.disabled = true;
       rateSlider.disabled = true;
       pitchSlider.disabled = true;
+      repeatSelect.disabled = true;
       practiceCards.forEach((card) => { card.disabled = true; });
       updatePauseButton(false);
       break;
 
     case 'paused':
-      statusText.textContent = 'Paused';
+      statusText.textContent = getStatusText(state);
       speakBtn.disabled = true;
       pauseBtn.disabled = false;
       stopBtn.disabled = false;
@@ -108,6 +119,7 @@ function setState(state) {
       voiceSelect.disabled = true;
       rateSlider.disabled = true;
       pitchSlider.disabled = true;
+      repeatSelect.disabled = true;
       practiceCards.forEach((card) => { card.disabled = true; });
       updatePauseButton(true);
       break;
@@ -115,12 +127,37 @@ function setState(state) {
     default:
       setState('idle');
   }
+
+  updateMediaSession();
 }
 
 function updatePauseButton(isPaused) {
   pauseBtn.innerHTML = isPaused
     ? '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3 2.5l8 4.5-8 4.5v-9z" fill="currentColor"/></svg>'
     : '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><rect x="3" y="2" width="3" height="10" fill="currentColor"/><rect x="8" y="2" width="3" height="10" fill="currentColor"/></svg>';
+}
+
+function getPlaybackProgressLabel() {
+  if (activeRepeatCount === 0 && activeRepeatIndex > 0) return ` ${activeRepeatIndex}`;
+  if (activeRepeatCount > 1) return ` ${activeRepeatIndex}/${activeRepeatCount}`;
+  return '';
+}
+
+function getStatusText(state) {
+  const progress = getPlaybackProgressLabel();
+
+  switch (state) {
+    case 'idle':
+      return speechSupported ? 'Ready' : 'Unsupported';
+    case 'loading':
+      return `Loading${progress}`;
+    case 'speaking':
+      return `Speaking${progress}`;
+    case 'paused':
+      return `Paused${progress}`;
+    default:
+      return 'Ready';
+  }
 }
 
 // ============ VOICES ============
@@ -196,7 +233,24 @@ function loadSettings() {
   rateValue.textContent = `${Number(settings.rate).toFixed(2)}×`;
   pitchSlider.value = settings.pitch;
   pitchValue.textContent = Number(settings.pitch).toFixed(1);
+  repeatSelect.value = String(normalizeRepeatCount(settings.repeatCount));
+  updateRepeatValue();
   applyTheme(settings.theme || 'light');
+}
+
+function normalizeRepeatCount(value) {
+  const count = Number.parseInt(value, 10);
+  return [0, 1, 2, 3, 5, 10].includes(count) ? count : 1;
+}
+
+function formatRepeatCount(count) {
+  if (count === 0) return 'Loop';
+  if (count === 1) return 'Off';
+  return `${count}x`;
+}
+
+function updateRepeatValue() {
+  repeatValue.textContent = formatRepeatCount(normalizeRepeatCount(repeatSelect.value));
 }
 
 function applyTheme(theme) {
@@ -217,29 +271,76 @@ function saveSettings() {
     voiceName: voiceSelect.value,
     rate: Number.parseFloat(rateSlider.value),
     pitch: Number.parseFloat(pitchSlider.value),
-    volume: 1.0
+    volume: 1.0,
+    repeatCount: normalizeRepeatCount(repeatSelect.value)
+  });
+}
+
+// ============ MEDIA SESSION ============
+
+function setMediaSessionAction(action, handler) {
+  if (!('mediaSession' in navigator)) return;
+
+  try {
+    navigator.mediaSession.setActionHandler(action, handler);
+  } catch (_) {
+    // Browsers expose different Media Session action sets.
+  }
+}
+
+function updateMediaSession() {
+  if (!('mediaSession' in navigator)) return;
+
+  try {
+    navigator.mediaSession.playbackState =
+      currentState === 'speaking' || (currentState === 'loading' && activeText) ? 'playing' :
+      currentState === 'paused' ? 'paused' :
+      'none';
+
+    if ('MediaMetadata' in window) {
+      const title = activeText
+        ? `${activeText.slice(0, 64)}${activeText.length > 64 ? '...' : ''}`
+        : 'Voxa';
+
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title,
+        artist: 'Native Voice Studio',
+        album: activeRepeatCount === 1 ? 'Text to speech' : `Repeat ${formatRepeatCount(activeRepeatCount)}`,
+        artwork: [
+          { src: '/icons/icon128.png', sizes: '128x128', type: 'image/png' }
+        ]
+      });
+    }
+  } catch (_) {
+    // Media Session is best-effort and should never block speech playback.
+  }
+}
+
+function setupMediaSession() {
+  if (!('mediaSession' in navigator)) return;
+
+  setMediaSessionAction('play', () => {
+    if (currentState === 'paused') {
+      pauseOrResume();
+      return;
+    }
+
+    if (currentState === 'idle') {
+      speak(textInput.value);
+    }
+  });
+  setMediaSessionAction('pause', () => {
+    if (currentState === 'speaking') pauseOrResume();
+  });
+  setMediaSessionAction('stop', () => {
+    if (currentState !== 'idle') stopSpeaking();
   });
 }
 
 // ============ ACTIONS ============
 
-function speak(text) {
-  const cleanText = text.trim();
-  if (!cleanText) {
-    textInput.focus();
-    return;
-  }
-
-  if (!speechSupported) {
-    statusText.textContent = 'Unsupported';
-    return;
-  }
-
-  saveSettings();
-  window.speechSynthesis.cancel();
-  setState('loading');
-
-  const utterance = new SpeechSynthesisUtterance(cleanText);
+function createUtterance(text) {
+  const utterance = new SpeechSynthesisUtterance(text);
   const selectedVoice = getSelectedVoice();
   const settings = getSettings();
 
@@ -254,28 +355,91 @@ function speak(text) {
   utterance.pitch = Number(settings.pitch) || 1;
   utterance.volume = Number(settings.volume) || 1;
 
-  utterance.onstart = () => setState('speaking');
+  return utterance;
+}
+
+function resetActivePlayback() {
+  currentUtterance = null;
+  activeText = '';
+  activeRepeatCount = 1;
+  activeRepeatIndex = 0;
+}
+
+function finishPlayback(sessionId) {
+  if (sessionId !== playbackSessionId) return;
+
+  resetActivePlayback();
+  setState('idle');
+}
+
+function playCurrentRepeat(sessionId) {
+  if (sessionId !== playbackSessionId || !activeText) return;
+
+  activeRepeatIndex += 1;
+  setState('loading');
+
+  const utterance = createUtterance(activeText);
+
+  utterance.onstart = () => {
+    if (sessionId === playbackSessionId) setState('speaking');
+  };
   utterance.onend = () => {
+    if (sessionId !== playbackSessionId) return;
+
     currentUtterance = null;
-    setState('idle');
+    const shouldContinue = activeRepeatCount === 0 || activeRepeatIndex < activeRepeatCount;
+
+    if (shouldContinue) {
+      setState('loading');
+      window.setTimeout(() => playCurrentRepeat(sessionId), REPEAT_GAP_MS);
+      return;
+    }
+
+    finishPlayback(sessionId);
   };
   utterance.onerror = (event) => {
+    if (sessionId !== playbackSessionId) return;
+
     console.error('Speech synthesis error:', event.error);
-    currentUtterance = null;
-    setState('idle');
+    finishPlayback(sessionId);
   };
-  utterance.onpause = () => setState('paused');
-  utterance.onresume = () => setState('speaking');
+  utterance.onpause = () => {
+    if (sessionId === playbackSessionId) setState('paused');
+  };
+  utterance.onresume = () => {
+    if (sessionId === playbackSessionId) setState('speaking');
+  };
 
   currentUtterance = utterance;
   window.speechSynthesis.speak(utterance);
 
   // Some browsers delay or skip `onstart` for local voices. Keep UI from being stuck in loading.
   window.setTimeout(() => {
-    if (currentState === 'loading' && window.speechSynthesis.speaking) {
+    if (sessionId === playbackSessionId && currentState === 'loading' && window.speechSynthesis.speaking) {
       setState('speaking');
     }
   }, 300);
+}
+
+function speak(text) {
+  const cleanText = text.trim();
+  if (!cleanText) {
+    textInput.focus();
+    return;
+  }
+
+  if (!speechSupported) {
+    statusText.textContent = 'Unsupported';
+    return;
+  }
+
+  saveSettings();
+  playbackSessionId += 1;
+  activeText = cleanText;
+  activeRepeatCount = normalizeRepeatCount(repeatSelect.value);
+  activeRepeatIndex = 0;
+  window.speechSynthesis.cancel();
+  playCurrentRepeat(playbackSessionId);
 }
 
 function pauseOrResume() {
@@ -292,8 +456,9 @@ function pauseOrResume() {
 
 function stopSpeaking() {
   if (!speechSupported) return;
+  playbackSessionId += 1;
   window.speechSynthesis.cancel();
-  currentUtterance = null;
+  resetActivePlayback();
   setState('idle');
 }
 
@@ -311,6 +476,11 @@ rateSlider.addEventListener('input', () => {
 
 pitchSlider.addEventListener('input', () => {
   pitchValue.textContent = Number.parseFloat(pitchSlider.value).toFixed(1);
+  saveSettings();
+});
+
+repeatSelect.addEventListener('change', () => {
+  updateRepeatValue();
   saveSettings();
 });
 
@@ -348,6 +518,7 @@ if (speechSupported) {
 // ============ INIT ============
 
 loadSettings();
+setupMediaSession();
 loadVoices();
 setTimeout(loadVoices, 200);
 setTimeout(loadVoices, 1000);
