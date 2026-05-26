@@ -11,7 +11,9 @@ const DEFAULT_SETTINGS = {
 };
 
 const STORAGE_KEY = 'voxa-settings';
+const HISTORY_STORAGE_KEY = 'voxa-history';
 const REPEAT_GAP_MS = 250;
+const MAX_HISTORY_ITEMS = 50;
 
 // Elements
 const app = document.querySelector('.app');
@@ -32,6 +34,8 @@ const statusPill = document.getElementById('statusPill');
 const statusText = statusPill.querySelector('.status-text');
 const practiceCards = document.querySelectorAll('.practice-card');
 const themeToggle = document.getElementById('themeToggle');
+const historyList = document.getElementById('historyList');
+const historyCount = document.getElementById('historyCount');
 
 const THEME_ORDER = ['light', 'dark', 'auto'];
 const THEME_LABELS = { dark: 'Dark mode', light: 'Light mode', auto: 'Auto (system)' };
@@ -60,6 +64,162 @@ function setSettings(partial) {
   const next = { ...getSettings(), ...partial };
   localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
   return next;
+}
+
+function getHistory() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(HISTORY_STORAGE_KEY) || '[]');
+    if (!Array.isArray(saved)) return [];
+
+    return saved
+      .map((item) => {
+        const createdAt = Number(item?.createdAt);
+        const text = typeof item?.text === 'string' ? item.text.trim() : '';
+
+        return {
+          id: typeof item?.id === 'string' ? item.id : `${createdAt}`,
+          text,
+          createdAt,
+          voiceName: typeof item?.voiceName === 'string' ? item.voiceName : '',
+          rate: Number.isFinite(Number(item?.rate)) ? Number(item.rate) : 1,
+          pitch: Number.isFinite(Number(item?.pitch)) ? Number(item.pitch) : 1,
+          repeatCount: normalizeRepeatCount(item?.repeatCount)
+        };
+      })
+      .filter((item) => item.text && Number.isFinite(item.createdAt))
+      .sort((a, b) => b.createdAt - a.createdAt);
+  } catch (_) {
+    return [];
+  }
+}
+
+function setHistory(items) {
+  const sorted = [...items]
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, MAX_HISTORY_ITEMS);
+
+  localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(sorted));
+  return sorted;
+}
+
+function createHistoryId() {
+  if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+    return window.crypto.randomUUID();
+  }
+
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function addHistoryItem(text) {
+  const cleanText = text.trim();
+  if (!cleanText) return;
+
+  const settings = getSettings();
+  const item = {
+    id: createHistoryId(),
+    text: cleanText,
+    createdAt: Date.now(),
+    voiceName: settings.voiceName,
+    rate: settings.rate,
+    pitch: settings.pitch,
+    repeatCount: normalizeRepeatCount(settings.repeatCount)
+  };
+
+  setHistory([item, ...getHistory()]);
+  renderHistory();
+}
+
+function deleteHistoryItem(id) {
+  setHistory(getHistory().filter((item) => item.id !== id));
+  renderHistory();
+}
+
+function formatHistoryTime(timestamp) {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return '';
+
+  const sameYear = date.getFullYear() === new Date().getFullYear();
+  return new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+    ...(sameYear ? {} : { year: 'numeric' }),
+    hour: '2-digit',
+    minute: '2-digit'
+  }).format(date);
+}
+
+function formatHistoryDetail(item) {
+  const parts = [
+    formatHistoryTime(item.createdAt),
+    item.voiceName || 'Default voice',
+    `${Number(item.rate).toFixed(2)}x`
+  ];
+
+  if (item.repeatCount !== 1) parts.push(formatRepeatCount(item.repeatCount));
+  return parts.filter(Boolean).join(' · ');
+}
+
+function updateHistoryControls() {
+  historyList.querySelectorAll('.history-replay').forEach((button) => {
+    button.disabled = currentState !== 'idle';
+  });
+}
+
+function renderHistory() {
+  const history = getHistory();
+  historyCount.textContent = String(history.length);
+  historyList.innerHTML = '';
+
+  if (history.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'history-empty';
+    empty.textContent = 'No reading history yet.';
+    historyList.appendChild(empty);
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+
+  history.forEach((item) => {
+    const row = document.createElement('div');
+    row.className = 'history-item';
+
+    const replayButton = document.createElement('button');
+    replayButton.type = 'button';
+    replayButton.className = 'history-replay';
+    replayButton.title = 'Play from history';
+    replayButton.disabled = currentState !== 'idle';
+
+    const text = document.createElement('span');
+    text.className = 'history-text';
+    text.textContent = item.text;
+
+    const meta = document.createElement('span');
+    meta.className = 'history-meta';
+    meta.textContent = formatHistoryDetail(item);
+
+    replayButton.append(text, meta);
+    replayButton.addEventListener('click', () => {
+      if (currentState !== 'idle') return;
+
+      textInput.value = item.text;
+      updateCharacterCount();
+      speak(item.text);
+    });
+
+    const deleteButton = document.createElement('button');
+    deleteButton.type = 'button';
+    deleteButton.className = 'history-delete';
+    deleteButton.title = 'Delete from history';
+    deleteButton.setAttribute('aria-label', 'Delete history item');
+    deleteButton.innerHTML = '<svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M2.5 3.5h9M5.5 3.5V2.25h3V3.5M4 5l.35 6.25h5.3L10 5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    deleteButton.addEventListener('click', () => deleteHistoryItem(item.id));
+
+    row.append(replayButton, deleteButton);
+    fragment.appendChild(row);
+  });
+
+  historyList.appendChild(fragment);
 }
 
 // ============ STATE MANAGEMENT ============
@@ -128,6 +288,7 @@ function setState(state) {
       setState('idle');
   }
 
+  updateHistoryControls();
   updateMediaSession();
 }
 
@@ -434,6 +595,7 @@ function speak(text) {
   }
 
   saveSettings();
+  addHistoryItem(cleanText);
   playbackSessionId += 1;
   activeText = cleanText;
   activeRepeatCount = normalizeRepeatCount(repeatSelect.value);
@@ -464,10 +626,12 @@ function stopSpeaking() {
 
 // ============ EVENT HANDLERS ============
 
-textInput.addEventListener('input', () => {
+function updateCharacterCount() {
   const len = textInput.value.length;
   charCount.textContent = `${len} character${len === 1 ? '' : 's'}`;
-});
+}
+
+textInput.addEventListener('input', updateCharacterCount);
 
 rateSlider.addEventListener('input', () => {
   rateValue.textContent = `${Number.parseFloat(rateSlider.value).toFixed(2)}×`;
@@ -495,7 +659,7 @@ practiceCards.forEach((card) => {
     if (currentState !== 'idle') return;
     const text = card.dataset.text || '';
     textInput.value = text;
-    charCount.textContent = `${text.length} characters`;
+    updateCharacterCount();
     speak(text);
   });
 });
@@ -519,6 +683,7 @@ if (speechSupported) {
 
 loadSettings();
 setupMediaSession();
+renderHistory();
 loadVoices();
 setTimeout(loadVoices, 200);
 setTimeout(loadVoices, 1000);
